@@ -22,9 +22,11 @@ import (
 
 	awsclient "github.com/aws/aws-sdk-go/aws/client"
 	"github.com/aws/aws-sdk-go/service/sts"
+	"github.com/aws/aws-sdk-go/service/sts/stsiface"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -48,7 +50,7 @@ type ROSAControlPlaneScopeParams struct {
 }
 
 // NewROSAControlPlaneScope creates a new ROSAControlPlaneScope from the supplied parameters.
-func NewROSAControlPlaneScope(params ROSAControlPlaneScopeParams) (*ROSAControlPlaneScope, error) {
+func NewROSAControlPlaneScope(params ROSAControlPlaneScopeParams, stsClientFactory func(cloud.ScopeUsage, cloud.Session, logger.Wrapper, runtime.Object) stsiface.STSAPI) (*ROSAControlPlaneScope, error) {
 	if params.Cluster == nil {
 		return nil, errors.New("failed to generate new scope from nil Cluster")
 	}
@@ -83,7 +85,7 @@ func NewROSAControlPlaneScope(params ROSAControlPlaneScopeParams) (*ROSAControlP
 	managedScope.session = session
 	managedScope.serviceLimiters = serviceLimiters
 
-	stsClient := NewSTSClient(managedScope, managedScope, managedScope, managedScope.ControlPlane)
+	stsClient := stsClientFactory(managedScope, managedScope, managedScope, managedScope.ControlPlane)
 	identity, err := stsClient.GetCallerIdentity(&sts.GetCallerIdentityInput{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to identify the AWS caller: %w", err)

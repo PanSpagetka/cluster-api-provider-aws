@@ -7,6 +7,7 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go/service/sts/stsiface"
 	"github.com/blang/semver"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -16,6 +17,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
@@ -31,6 +33,7 @@ import (
 
 	rosacontrolplanev1 "sigs.k8s.io/cluster-api-provider-aws/v2/controlplane/rosa/api/v1beta2"
 	expinfrav1 "sigs.k8s.io/cluster-api-provider-aws/v2/exp/api/v1beta2"
+	"sigs.k8s.io/cluster-api-provider-aws/v2/pkg/cloud"
 	"sigs.k8s.io/cluster-api-provider-aws/v2/pkg/cloud/scope"
 	"sigs.k8s.io/cluster-api-provider-aws/v2/pkg/logger"
 	"sigs.k8s.io/cluster-api-provider-aws/v2/pkg/rosa"
@@ -48,11 +51,15 @@ type ROSAMachinePoolReconciler struct {
 	Recorder         record.EventRecorder
 	WatchFilterValue string
 	Endpoints        []scope.ServiceEndpoint
+	newStsClient     func(cloud.ScopeUsage, cloud.Session, logger.Wrapper, runtime.Object) stsiface.STSAPI
+	newOCMClient     func(ctx context.Context, rosaScope *scope.ROSAControlPlaneScope) (rosa.OCMClient, error)
 }
 
 // SetupWithManager is used to setup the controller.
 func (r *ROSAMachinePoolReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, options controller.Options) error {
 	log := logger.FromContext(ctx)
+	r.newOCMClient = rosa.NewOCMClient
+	// r.newStsClient = rosa.NewService
 
 	gvk, err := apiutil.GVKForObject(new(expinfrav1.ROSAMachinePool), mgr.GetScheme())
 	if err != nil {
@@ -84,6 +91,7 @@ func (r *ROSAMachinePoolReconciler) SetupWithManager(ctx context.Context, mgr ct
 // Reconcile reconciles ROSAMachinePool.
 func (r *ROSAMachinePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Result, reterr error) {
 	log := logger.FromContext(ctx)
+	fmt.Println("RECONCILE", req.NamespacedName, req.Namespace, req.Name)
 
 	rosaMachinePool := &expinfrav1.ROSAMachinePool{}
 	if err := r.Get(ctx, req.NamespacedName, rosaMachinePool); err != nil {
@@ -99,17 +107,23 @@ func (r *ROSAMachinePoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 	if machinePool == nil {
+
 		log.Info("MachinePool Controller has not yet set OwnerRef")
 		return ctrl.Result{}, nil
 	}
+
+	fmt.Println("RECONCILE 2", machinePool.ObjectMeta.Labels)
 
 	log = log.WithValues("MachinePool", klog.KObj(machinePool))
 
 	cluster, err := util.GetClusterFromMetadata(ctx, r.Client, machinePool.ObjectMeta)
 	if err != nil {
 		log.Info("Failed to retrieve Cluster from MachinePool")
+
 		return ctrl.Result{}, nil
 	}
+
+	fmt.Println("RECONCILE 3", cluster.Spec)
 
 	if annotations.IsPaused(cluster, rosaMachinePool) {
 		log.Info("Reconciliation is paused for this object")
@@ -124,6 +138,8 @@ func (r *ROSAMachinePoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 	controlPlane := &rosacontrolplanev1.ROSAControlPlane{}
 	if err := r.Client.Get(ctx, controlPlaneKey, controlPlane); err != nil {
+		fmt.Println("ERR", err, controlPlaneKey, controlPlane)
+
 		log.Info("Failed to retrieve ControlPlane from MachinePool")
 		return ctrl.Result{}, err
 	}
@@ -142,22 +158,28 @@ func (r *ROSAMachinePoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, errors.Wrap(err, "failed to create rosaMachinePool scope")
 	}
 
+	fmt.Println("RECONCILE 4")
+
 	rosaControlPlaneScope, err := scope.NewROSAControlPlaneScope(scope.ROSAControlPlaneScopeParams{
 		Client:         r.Client,
 		Cluster:        cluster,
 		ControlPlane:   controlPlane,
 		ControllerName: "rosaControlPlane",
 		Endpoints:      r.Endpoints,
-	})
+	}, r.newStsClient)
 	if err != nil {
 		return ctrl.Result{}, errors.Wrap(err, "failed to create rosaControlPlane scope")
 	}
+
+	fmt.Println("RECONCILE 5", controlPlane.Status)
 
 	if !controlPlane.Status.Ready && controlPlane.ObjectMeta.DeletionTimestamp.IsZero() {
 		log.Info("Control plane is not ready yet")
 		err := machinePoolScope.RosaMchinePoolReadyFalse(expinfrav1.WaitingForRosaControlPlaneReason, "")
 		return ctrl.Result{}, err
 	}
+
+	fmt.Println("RECONCILE 6")
 
 	defer func() {
 		conditions.SetSummary(machinePoolScope.RosaMachinePool, conditions.WithConditions(expinfrav1.RosaMachinePoolReadyCondition), conditions.WithStepCounter())
@@ -170,6 +192,8 @@ func (r *ROSAMachinePoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if !rosaMachinePool.ObjectMeta.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, r.reconcileDelete(ctx, machinePoolScope, rosaControlPlaneScope)
 	}
+
+	fmt.Println("RECONCILE 7")
 
 	return r.reconcileNormal(ctx, machinePoolScope, rosaControlPlaneScope)
 }
@@ -186,12 +210,14 @@ func (r *ROSAMachinePoolReconciler) reconcileNormal(ctx context.Context,
 		}
 	}
 
-	ocmClient, err := rosa.NewOCMClient(ctx, rosaControlPlaneScope)
+	ocmClient, err := r.newOCMClient(ctx, rosaControlPlaneScope)
+
 	if err != nil {
 		// TODO: need to expose in status, as likely the credentials are invalid
 		return ctrl.Result{}, fmt.Errorf("failed to create OCM client: %w", err)
 	}
 
+	fmt.Println("reconcileNormal 2")
 	failureMessage, err := validateMachinePoolSpec(machinePoolScope)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to validate ROSAMachinePool.spec: %w", err)
@@ -206,6 +232,8 @@ func (r *ROSAMachinePoolReconciler) reconcileNormal(ctx context.Context,
 	rosaMachinePool := machinePoolScope.RosaMachinePool
 	machinePool := machinePoolScope.MachinePool
 
+	fmt.Println("reconcileNormal 3")
+
 	if rosaMachinePool.Spec.Autoscaling != nil && !annotations.ReplicasManagedByExternalAutoscaler(machinePool) {
 		// make sure cluster.x-k8s.io/replicas-managed-by annotation is set on CAPI MachinePool when autoscaling is enabled.
 		annotations.AddAnnotations(machinePool, map[string]string{
@@ -216,10 +244,16 @@ func (r *ROSAMachinePoolReconciler) reconcileNormal(ctx context.Context,
 		}
 	}
 
+	fmt.Println("reconcileNormal 4", machinePoolScope.ControlPlane.Status.ID, rosaMachinePool.Spec.NodePoolName)
+
 	nodePool, found, err := ocmClient.GetNodePool(machinePoolScope.ControlPlane.Status.ID, rosaMachinePool.Spec.NodePoolName)
+	fmt.Println("reconcileNormal 4", nodePool, found, err)
+
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+
+	fmt.Println("reconcileNormal 5")
 
 	if found {
 		if rosaMachinePool.Spec.AvailabilityZone == "" {
@@ -272,11 +306,15 @@ func (r *ROSAMachinePoolReconciler) reconcileNormal(ctx context.Context,
 		return ctrl.Result{RequeueAfter: time.Second * 60}, nil
 	}
 
+	fmt.Println("reconcileNormal 6")
+
 	npBuilder := nodePoolBuilder(rosaMachinePool.Spec, machinePool.Spec)
 	nodePoolSpec, err := npBuilder.Build()
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to build rosa nodepool: %w", err)
 	}
+
+	fmt.Println("reconcileNormal 7")
 
 	nodePool, err = ocmClient.CreateNodePool(machinePoolScope.ControlPlane.Status.ID, nodePoolSpec)
 	if err != nil {
@@ -288,6 +326,8 @@ func (r *ROSAMachinePoolReconciler) reconcileNormal(ctx context.Context,
 		return ctrl.Result{}, fmt.Errorf("failed to create nodepool: %w", err)
 	}
 
+	fmt.Println("reconcileNormal 8")
+
 	machinePoolScope.RosaMachinePool.Status.ID = nodePool.ID()
 	return ctrl.Result{}, nil
 }
@@ -298,29 +338,35 @@ func (r *ROSAMachinePoolReconciler) reconcileDelete(
 ) error {
 	machinePoolScope.Info("Reconciling deletion of RosaMachinePool")
 
-	ocmClient, err := rosa.NewOCMClient(ctx, rosaControlPlaneScope)
+	ocmClient, err := r.newOCMClient(ctx, rosaControlPlaneScope)
 	if err != nil {
 		// TODO: need to expose in status, as likely the credentials are invalid
 		return fmt.Errorf("failed to create OCM client: %w", err)
 	}
+	fmt.Println("DELET 1", machinePoolScope.ControlPlane.Status.ID)
 
 	nodePool, found, err := ocmClient.GetNodePool(machinePoolScope.ControlPlane.Status.ID, machinePoolScope.NodePoolName())
 	if err != nil {
 		return err
 	}
+
 	if found {
+		fmt.Println("DELET 2", machinePoolScope.ControlPlane.Status.ID, nodePool.ID())
 		if err := ocmClient.DeleteNodePool(machinePoolScope.ControlPlane.Status.ID, nodePool.ID()); err != nil {
+			fmt.Println("ERR", err)
 			return err
 		}
 		machinePoolScope.Info("Successfully deleted NodePool")
 	}
+
+	fmt.Println("DELET 3")
 
 	controllerutil.RemoveFinalizer(machinePoolScope.RosaMachinePool, expinfrav1.RosaMachinePoolFinalizer)
 
 	return nil
 }
 
-func (r *ROSAMachinePoolReconciler) reconcileMachinePoolVersion(machinePoolScope *scope.RosaMachinePoolScope, ocmClient *ocm.Client, nodePool *cmv1.NodePool) error {
+func (r *ROSAMachinePoolReconciler) reconcileMachinePoolVersion(machinePoolScope *scope.RosaMachinePoolScope, ocmClient rosa.OCMClient, nodePool *cmv1.NodePool) error {
 	version := machinePoolScope.RosaMachinePool.Spec.Version
 	if version == "" || version == rosa.RawVersionID(nodePool.Version()) {
 		conditions.MarkFalse(machinePoolScope.RosaMachinePool, expinfrav1.RosaMachinePoolUpgradingCondition, "upgraded", clusterv1.ConditionSeverityInfo, "")
@@ -356,7 +402,7 @@ func (r *ROSAMachinePoolReconciler) reconcileMachinePoolVersion(machinePoolScope
 	return nil
 }
 
-func (r *ROSAMachinePoolReconciler) updateNodePool(machinePoolScope *scope.RosaMachinePoolScope, ocmClient *ocm.Client, nodePool *cmv1.NodePool) (*cmv1.NodePool, error) {
+func (r *ROSAMachinePoolReconciler) updateNodePool(machinePoolScope *scope.RosaMachinePoolScope, ocmClient rosa.OCMClient, nodePool *cmv1.NodePool) (*cmv1.NodePool, error) {
 	machinePool := machinePoolScope.RosaMachinePool.DeepCopy()
 	// default all fields before comparing, so that nil/unset fields don't cause an unnecessary update call.
 	machinePool.Default()

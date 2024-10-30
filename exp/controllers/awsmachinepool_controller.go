@@ -558,13 +558,16 @@ func diffASG(machinePoolScope *scope.MachinePoolScope, existingASG *expinfrav1.A
 // getOwnerMachinePool returns the MachinePool object owning the current resource.
 func getOwnerMachinePool(ctx context.Context, c client.Client, obj metav1.ObjectMeta) (*expclusterv1.MachinePool, error) {
 	for _, ref := range obj.OwnerReferences {
+		fmt.Println("getOwnerMachinePool", ref.Kind)
 		if ref.Kind != "MachinePool" {
 			continue
 		}
 		gv, err := schema.ParseGroupVersion(ref.APIVersion)
 		if err != nil {
+			fmt.Println("ERR", err)
 			return nil, errors.WithStack(err)
 		}
+		fmt.Println("gv", gv)
 		if gv.Group == expclusterv1.GroupVersion.Group {
 			return getMachinePoolByName(ctx, c, obj.Namespace, ref.Name)
 		}
@@ -576,6 +579,7 @@ func getOwnerMachinePool(ctx context.Context, c client.Client, obj metav1.Object
 func getMachinePoolByName(ctx context.Context, c client.Client, namespace, name string) (*expclusterv1.MachinePool, error) {
 	m := &expclusterv1.MachinePool{}
 	key := client.ObjectKey{Name: name, Namespace: namespace}
+	fmt.Println("getMachinePoolByName", name)
 	if err := c.Get(ctx, key, m); err != nil {
 		return nil, err
 	}
