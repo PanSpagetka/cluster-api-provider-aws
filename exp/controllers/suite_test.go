@@ -76,6 +76,9 @@ func setup() {
 	if err := (&expinfrav1.AWSManagedMachinePool{}).SetupWebhookWithManager(testEnv); err != nil {
 		panic(fmt.Sprintf("Unable to setup AWSManagedMachinePool webhook: %v", err))
 	}
+	// if err := (&expinfrav1.ROSAMachinePool{}).SetupWebhookWithManager(testEnv); err != nil {
+	// 	panic(fmt.Sprintf("Unable to setup ROSAMachinePool webhook: %v", err))
+	// }
 	go func() {
 		fmt.Println("Starting the manager")
 		if err := testEnv.StartManager(ctx); err != nil {

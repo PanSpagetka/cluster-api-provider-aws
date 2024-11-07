@@ -420,6 +420,11 @@ setup-envtest: install-setup-envtest # Build setup-envtest from tools folder.
 .PHONY: test
 test: setup-envtest ## Run tests
 	KUBEBUILDER_ASSETS="$(KUBEBUILDER_ASSETS)"  /usr/local/go/bin/go test -timeout 30s -run ^TestRosa  sigs.k8s.io/cluster-api-provider-aws/v2/exp/controllers
+	# KUBEBUILDER_ASSETS="$(KUBEBUILDER_ASSETS)" go test  ./...
+
+.PHONY: testa
+testa: setup-envtest ## Run tests
+	KUBEBUILDER_ASSETS="$(KUBEBUILDER_ASSETS)"  /usr/local/go/bin/go test -timeout 30s -run ^TestRosaAAAA  sigs.k8s.io/cluster-api-provider-aws/v2/exp/controllers
 
 .PHONY: test-verbose
 test-verbose: setup-envtest ## Run tests with verbose settings.

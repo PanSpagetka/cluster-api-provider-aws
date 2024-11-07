@@ -59,7 +59,7 @@ type ROSAMachinePoolReconciler struct {
 func (r *ROSAMachinePoolReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, options controller.Options) error {
 	log := logger.FromContext(ctx)
 	r.newOCMClient = rosa.NewOCMClient
-	// r.newStsClient = rosa.NewService
+	r.newStsClient = scope.NewSTSClient
 
 	gvk, err := apiutil.GVKForObject(new(expinfrav1.ROSAMachinePool), mgr.GetScheme())
 	if err != nil {
@@ -195,7 +195,9 @@ func (r *ROSAMachinePoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	fmt.Println("RECONCILE 7")
 
-	return r.reconcileNormal(ctx, machinePoolScope, rosaControlPlaneScope)
+	res, err := r.reconcileNormal(ctx, machinePoolScope, rosaControlPlaneScope)
+	fmt.Println("returning ", res, err)
+	return res, err
 }
 
 func (r *ROSAMachinePoolReconciler) reconcileNormal(ctx context.Context,
@@ -232,28 +234,28 @@ func (r *ROSAMachinePoolReconciler) reconcileNormal(ctx context.Context,
 	rosaMachinePool := machinePoolScope.RosaMachinePool
 	machinePool := machinePoolScope.MachinePool
 
-	fmt.Println("reconcileNormal 3")
+	fmt.Println("reconcileNormal 3", machinePool.Name, machinePool.Kind, machinePool.Annotations)
 
 	if rosaMachinePool.Spec.Autoscaling != nil && !annotations.ReplicasManagedByExternalAutoscaler(machinePool) {
 		// make sure cluster.x-k8s.io/replicas-managed-by annotation is set on CAPI MachinePool when autoscaling is enabled.
 		annotations.AddAnnotations(machinePool, map[string]string{
 			clusterv1.ReplicasManagedByAnnotation: "rosa",
 		})
+		fmt.Println("PatchCAPIMachinePoolObject")
 		if err := machinePoolScope.PatchCAPIMachinePoolObject(ctx); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
 
-	fmt.Println("reconcileNormal 4", machinePoolScope.ControlPlane.Status.ID, rosaMachinePool.Spec.NodePoolName)
+	fmt.Println("reconcileNormal 4", machinePool.Annotations)
 
 	nodePool, found, err := ocmClient.GetNodePool(machinePoolScope.ControlPlane.Status.ID, rosaMachinePool.Spec.NodePoolName)
-	fmt.Println("reconcileNormal 4", nodePool, found, err)
 
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	fmt.Println("reconcileNormal 5")
+	fmt.Println("reconcileNormal 5", found)
 
 	if found {
 		if rosaMachinePool.Spec.AvailabilityZone == "" {
@@ -262,12 +264,16 @@ func (r *ROSAMachinePoolReconciler) reconcileNormal(ctx context.Context,
 		}
 
 		nodePool, err := r.updateNodePool(machinePoolScope, ocmClient, nodePool)
+		fmt.Println("ERR", err)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to ensure rosaMachinePool: %w", err)
 		}
 
 		currentReplicas := int32(nodePool.Status().CurrentReplicas())
+		fmt.Println("reconcileNormal 5", *machinePool.Spec.Replicas, currentReplicas)
+
 		if annotations.ReplicasManagedByExternalAutoscaler(machinePool) {
+
 			// Set MachinePool replicas to rosa autoscaling replicas
 			if *machinePool.Spec.Replicas != currentReplicas {
 				machinePoolScope.Info("Setting MachinePool replicas to rosa autoscaling replicas",
@@ -275,6 +281,7 @@ func (r *ROSAMachinePoolReconciler) reconcileNormal(ctx context.Context,
 					"external", currentReplicas)
 				machinePool.Spec.Replicas = &currentReplicas
 				if err := machinePoolScope.PatchCAPIMachinePoolObject(ctx); err != nil {
+					fmt.Println("FAILED TO PATCH", err)
 					return ctrl.Result{}, err
 				}
 			}
@@ -282,6 +289,8 @@ func (r *ROSAMachinePoolReconciler) reconcileNormal(ctx context.Context,
 		if err := r.reconcileProviderIDList(ctx, machinePoolScope, nodePool); err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to reconcile ProviderIDList: %w", err)
 		}
+
+		fmt.Println("REPLICAS", machinePool.Spec.Replicas)
 
 		rosaMachinePool.Status.Replicas = currentReplicas
 		if rosa.IsNodePoolReady(nodePool) {
@@ -295,6 +304,8 @@ func (r *ROSAMachinePoolReconciler) reconcileNormal(ctx context.Context,
 			return ctrl.Result{}, nil
 		}
 
+		fmt.Println("mark false")
+
 		conditions.MarkFalse(rosaMachinePool,
 			expinfrav1.RosaMachinePoolReadyCondition,
 			nodePool.Status().Message(),
@@ -302,6 +313,7 @@ func (r *ROSAMachinePoolReconciler) reconcileNormal(ctx context.Context,
 			"")
 
 		machinePoolScope.Info("waiting for NodePool to become ready", "state", nodePool.Status().Message())
+		fmt.Println("returning")
 		// Requeue so that status.ready is set to true when the nodepool is fully created.
 		return ctrl.Result{RequeueAfter: time.Second * 60}, nil
 	}

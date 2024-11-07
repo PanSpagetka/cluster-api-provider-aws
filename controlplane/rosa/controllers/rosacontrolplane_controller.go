@@ -31,6 +31,7 @@ import (
 
 	stsv2 "github.com/aws/aws-sdk-go-v2/service/sts"
 	sts "github.com/aws/aws-sdk-go/service/sts"
+	"github.com/aws/aws-sdk-go/service/sts/stsiface"
 	"github.com/google/go-cmp/cmp"
 	idputils "github.com/openshift-online/ocm-common/pkg/idp/utils"
 	cmv1 "github.com/openshift-online/ocm-sdk-go/clustersmgmt/v1"
@@ -40,6 +41,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apiserver/pkg/storage/names"
@@ -58,6 +60,7 @@ import (
 	rosacontrolplanev1 "sigs.k8s.io/cluster-api-provider-aws/v2/controlplane/rosa/api/v1beta2"
 	expinfrav1 "sigs.k8s.io/cluster-api-provider-aws/v2/exp/api/v1beta2"
 	"sigs.k8s.io/cluster-api-provider-aws/v2/pkg/annotations"
+	"sigs.k8s.io/cluster-api-provider-aws/v2/pkg/cloud"
 	"sigs.k8s.io/cluster-api-provider-aws/v2/pkg/cloud/scope"
 	"sigs.k8s.io/cluster-api-provider-aws/v2/pkg/logger"
 	"sigs.k8s.io/cluster-api-provider-aws/v2/pkg/rosa"
@@ -89,6 +92,8 @@ type ROSAControlPlaneReconciler struct {
 	WatchFilterValue string
 	WaitInfraPeriod  time.Duration
 	Endpoints        []scope.ServiceEndpoint
+	newStsClient     func(cloud.ScopeUsage, cloud.Session, logger.Wrapper, runtime.Object) stsiface.STSAPI
+	newOCMClient     func(ctx context.Context, rosaScope *scope.ROSAControlPlaneScope) (rosa.OCMClient, error)
 }
 
 // SetupWithManager is used to setup the controller.
@@ -173,7 +178,7 @@ func (r *ROSAControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		ControllerName: strings.ToLower(rosaControlPlaneKind),
 		Endpoints:      r.Endpoints,
 		Logger:         log,
-	})
+	}, r.newStsClient)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to create scope: %w", err)
 	}
@@ -203,7 +208,7 @@ func (r *ROSAControlPlaneReconciler) reconcileNormal(ctx context.Context, rosaSc
 		}
 	}
 
-	ocmClient, err := rosa.NewOCMClient(ctx, rosaScope)
+	ocmClient, err := r.newOCMClient(ctx, rosaScope)
 	if err != nil {
 		// TODO: need to expose in status, as likely the credentials are invalid
 		return ctrl.Result{}, fmt.Errorf("failed to create OCM client: %w", err)
@@ -406,7 +411,7 @@ func (r *ROSAControlPlaneReconciler) deleteMachinePools(ctx context.Context, ros
 	return len(machinePools) == 0, nil
 }
 
-func (r *ROSAControlPlaneReconciler) reconcileClusterVersion(rosaScope *scope.ROSAControlPlaneScope, ocmClient *ocm.Client, cluster *cmv1.Cluster) error {
+func (r *ROSAControlPlaneReconciler) reconcileClusterVersion(rosaScope *scope.ROSAControlPlaneScope, ocmClient rosa.OCMClient, cluster *cmv1.Cluster) error {
 	version := rosaScope.ControlPlane.Spec.Version
 	if version == rosa.RawVersionID(cluster.Version()) {
 		conditions.MarkFalse(rosaScope.ControlPlane, rosacontrolplanev1.ROSAControlPlaneUpgradingCondition, "upgraded", clusterv1.ConditionSeverityInfo, "")
@@ -441,7 +446,7 @@ func (r *ROSAControlPlaneReconciler) reconcileClusterVersion(rosaScope *scope.RO
 	return nil
 }
 
-func (r *ROSAControlPlaneReconciler) updateOCMCluster(rosaScope *scope.ROSAControlPlaneScope, ocmClient *ocm.Client, cluster *cmv1.Cluster, creator *rosaaws.Creator) error {
+func (r *ROSAControlPlaneReconciler) updateOCMCluster(rosaScope *scope.ROSAControlPlaneScope, ocmClient rosa.OCMClient, cluster *cmv1.Cluster, creator *rosaaws.Creator) error {
 	ocmClusterSpec, updated := r.updateOCMClusterSpec(rosaScope.ControlPlane, cluster)
 
 	if updated {
@@ -738,7 +743,7 @@ func (r *ROSAControlPlaneReconciler) reconcileExternalAuthBootstrapKubeconfig(ct
 	return nil
 }
 
-func (r *ROSAControlPlaneReconciler) reconcileKubeconfig(ctx context.Context, rosaScope *scope.ROSAControlPlaneScope, ocmClient *ocm.Client, cluster *cmv1.Cluster) error {
+func (r *ROSAControlPlaneReconciler) reconcileKubeconfig(ctx context.Context, rosaScope *scope.ROSAControlPlaneScope, ocmClient rosa.OCMClient, cluster *cmv1.Cluster) error {
 	rosaScope.Debug("Reconciling ROSA kubeconfig for cluster", "cluster-name", rosaScope.RosaClusterName())
 
 	clusterRef := client.ObjectKeyFromObject(rosaScope.Cluster)
@@ -850,7 +855,7 @@ func (r *ROSAControlPlaneReconciler) reconcileClusterAdminPassword(ctx context.C
 	return password, nil
 }
 
-func validateControlPlaneSpec(ocmClient *ocm.Client, rosaScope *scope.ROSAControlPlaneScope) (string, error) {
+func validateControlPlaneSpec(ocmClient rosa.OCMClient, rosaScope *scope.ROSAControlPlaneScope) (string, error) {
 	version := rosaScope.ControlPlane.Spec.Version
 	valid, err := ocmClient.ValidateHypershiftVersion(version, ocm.DefaultChannelGroup)
 	if err != nil {

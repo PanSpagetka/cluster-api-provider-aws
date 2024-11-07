@@ -13,7 +13,7 @@ import (
 var MinSupportedVersion = semver.MustParse("4.14.0")
 
 // CheckExistingScheduledUpgrade checks and returns the current upgrade schedule if any.
-func CheckExistingScheduledUpgrade(client *ocm.Client, cluster *cmv1.Cluster) (*cmv1.ControlPlaneUpgradePolicy, error) {
+func CheckExistingScheduledUpgrade(client OCMClient, cluster *cmv1.Cluster) (*cmv1.ControlPlaneUpgradePolicy, error) {
 	upgradePolicies, err := client.GetControlPlaneUpgradePolicies(cluster.ID())
 	if err != nil {
 		return nil, err
