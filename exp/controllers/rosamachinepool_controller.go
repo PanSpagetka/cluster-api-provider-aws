@@ -304,16 +304,27 @@ func (r *ROSAMachinePoolReconciler) reconcileNormal(ctx context.Context,
 			return ctrl.Result{}, nil
 		}
 
-		fmt.Println("mark false")
+		conds := rosaMachinePool.GetConditions()
+		cond := conditions.FalseCondition(expinfrav1.RosaMachinePoolReadyCondition, nodePool.Status().Message(), clusterv1.ConditionSeverityInfo, "")
+		cond.LastTransitionTime = metav1.NewTime(time.Now().UTC().Truncate(time.Second))
+		conds = append(conds, *cond)
 
-		conditions.MarkFalse(rosaMachinePool,
-			expinfrav1.RosaMachinePoolReadyCondition,
-			nodePool.Status().Message(),
-			clusterv1.ConditionSeverityInfo,
-			"")
+		// rosaMachinePool.SetConditions(conds)
+		fmt.Println("mark false", rosaMachinePool.Status.Conditions, conds)
+		rosaMachinePool.Status.Conditions = conds
+		// rosaMachinePool.Status.Ready = true
+		// conditions.SetSummary(rosaMachinePool, conditions.WithStepCounter())
+		// return ctrl.Result{}, nil
+
+		// conditions.MarkFalse(rosaMachinePool,
+		// 	expinfrav1.RosaMachinePoolReadyCondition,
+		// 	nodePool.Status().Message(),
+		// 	clusterv1.ConditionSeverityInfo,
+		// 	"")
 
 		machinePoolScope.Info("waiting for NodePool to become ready", "state", nodePool.Status().Message())
 		fmt.Println("returning")
+
 		// Requeue so that status.ready is set to true when the nodepool is fully created.
 		return ctrl.Result{RequeueAfter: time.Second * 60}, nil
 	}
